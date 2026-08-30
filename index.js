@@ -11,7 +11,7 @@ const spotifyStatsAPI = "http://192.168.178.124:6969";
 const commands = [
     new SlashCommandBuilder()
         .setName("song")
-        .setDescription("Get currently playing song!")
+        .setDescription("Get custom data of a song!")
         .addStringOption(option =>
             option
                 .setName("songid")
@@ -21,11 +21,21 @@ const commands = [
         .toJSON(),
     new SlashCommandBuilder()
         .setName("covers")
-        .setDescription("Get covers of currently playing song!")
+        .setDescription("Get covers of a song!")
         .addStringOption(option =>
             option
                 .setName("songid")
                 .setDescription("Get covers from this song")
+                .setRequired(false)
+        )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName("lyrics")
+        .setDescription("Get lyrics of a song!")
+        .addStringOption(option =>
+            option
+                .setName("songid")
+                .setDescription("Get lyrics from this song")
                 .setRequired(false)
         )
         .toJSON()
@@ -61,42 +71,109 @@ client.on("interactionCreate", async (interaction) => {
 
         const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
 
-        const title = safeText(currentCustomSongData.default_title, "Song Info");
-        const customUrl = safeText(currentCustomSongData.custom_url, "Keine URL");
-        const customLrcLib = safeText(currentCustomSongData.custom_lrclib, "Keine Suche");
-        const altTitles = Array.isArray(currentCustomSongData.alternative_titles)
-            ? currentCustomSongData.alternative_titles.filter(Boolean).join(", ") || "Keine"
-            : "Keine";
-        const coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : null;
+        let title;
+        let artist;
+        let album;
+        let coverUrl;
+        let footerSongID;
+
+        let customUrl;
+        let customLrcLib;
+        let ogTitle;
+        let altTitles;
+        let customArtist;
+        let customAlbum;
+        let altAlbums;
+
+
+
+        if (!songID) {
+            // Ohne Song ID || Current Playing
+            coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : isValidHttpUrl(currentSong.cover_URL) ? currentSong.cover_URL : null;
+            title = safeText(currentSong.title, currentCustomSongData.default_title) || "";
+            artist = safeText(currentSong.artist);
+            album = safeText(currentSong.album);
+
+        } else {
+            coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : null;
+            title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
+            artist = safeText(getArtistFromSongID(songIDToUse));
+            album = safeText(getAlbumFromSongID(songIDToUse));
+        }
+
+
+
+        footerSongID = safeText(songIDToUse);
+        customUrl = safeText(currentCustomSongData.custom_url);
+        customLrcLib = safeText(currentCustomSongData.custom_lrclib);
+        ogTitle = safeText(currentCustomSongData.default_title);
+        altTitles = Array.isArray(currentCustomSongData.alternative_titles)
+            ? currentCustomSongData.alternative_titles
+                .filter(Boolean)
+                .map(title => `- ${title}`)
+                .join("\n") || "N/A"
+            : "N/A";
+
+        customArtist = safeText(currentCustomSongData.custom_artist);
+        customAlbum = safeText(currentCustomSongData.custom_album);
+        altAlbums = Array.isArray(currentCustomSongData.alternative_albums)
+            ? currentCustomSongData.alternative_albums
+                .filter(Boolean)
+                .map(title => `- ${title}`)
+                .join("\n") || "N/A"
+            : "N/A";
+
+
+
+
 
         const songInfoEmbed = new EmbedBuilder()
             .setTitle(title)
             .setColor("Blue")
-            .addFields(
-                { name: "Custom Genius URL", value: customUrl, inline: true },
-                { name: "Custom LRCLIB Search", value: customLrcLib, inline: true }
-            )
-            .addFields({ name: "Alternative Titles", value: altTitles });
+            .setAuthor({ "name": artist })
+            .setFooter({ text: `Song ID: ${footerSongID}` });
 
-        /*if (currentSong.dominant_Color) {
-            songInfoEmbed.setThumbnail("rgb(" + (currentSong.dominant_Color).join(", ") + ")");
-        }*/
-
+        if (currentSong.dominant_Color) {
+            let [r, g, b] = currentSong.dominant_Color
+            songInfoEmbed.setColor(rgb_to_decimal(r, g, b));
+        }
         if (coverUrl) {
             songInfoEmbed.setThumbnail(coverUrl);
         }
 
-        if (songID) {
-            songInfoEmbed.setFooter({ text: `Song ID: ${songID}` });
-        }
+        addFieldIfValid("Default Title", ogTitle, songInfoEmbed);
+        addFieldIfValid("Album", album, songInfoEmbed);
+        addFieldIfValid("Custom Genius URL", customUrl, songInfoEmbed);
+        addFieldIfValid("Custom LRCLIB Search", customLrcLib, songInfoEmbed);
+        addFieldIfValid("Alternative Titles", altTitles, songInfoEmbed);
+        addFieldIfValid("Custom Artist", customArtist, songInfoEmbed);
+        addFieldIfValid("Custom Album", customAlbum, songInfoEmbed);
+        addFieldIfValid("Alternative Albums", altAlbums, songInfoEmbed);
+
+
 
         await safeReply(interaction, { embeds: [songInfoEmbed] });
 
+        return;
+    }
+
+    if (interaction.commandName === "lyrics") {
+        const songID = interaction.options.getString("songid");
+        const currentSong = await getSongData();
+        const songIDToUse = songID || currentSong?.songID;
+
+        if (!songIDToUse) {
+            await safeReply(interaction, {
+                embeds: [new EmbedBuilder().setTitle("Couldn't find the song").setColor("Red")]
+            });
+            return;
+        }
+
+        const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
+        await interaction.reply("# Synced Lyrics");
         if (currentCustomSongData.custom_synced_lyrics) {
             await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics);
         }
-
-        return;
     }
 
     if (interaction.commandName === "covers") {
@@ -107,7 +184,7 @@ client.on("interactionCreate", async (interaction) => {
         const songIdToUse = coversSongID || currentSong?.songID;
 
         if (!songIdToUse) {
-            await interaction.editReply("Ich konnte keinen Song finden.").catch(() => {});
+            await interaction.editReply("Ich konnte keinen Song finden.").catch(() => { });
             return;
         }
 
@@ -119,7 +196,7 @@ client.on("interactionCreate", async (interaction) => {
             .filter(isValidHttpUrl);
 
         if (coverUrls.length === 0) {
-            await interaction.editReply("Für diesen Song gibt es keine Covers.").catch(() => {});
+            await interaction.editReply("Für diesen Song gibt es keine Covers.").catch(() => { });
             return;
         }
 
@@ -131,14 +208,56 @@ client.on("interactionCreate", async (interaction) => {
             }
         } catch (err) {
             console.error("Error while sending cover URLs:", err);
-            await interaction.followUp({ content: "Die Covers konnten nicht sauber gesendet werden. Bitte versuche es erneut." }).catch(() => {});
+            await interaction.followUp({ content: "Die Covers konnten nicht sauber gesendet werden. Bitte versuche es erneut." }).catch(() => { });
         }
     }
 
 });
 
 
+function getTitleFromSongID(songID) {
+    if (songID.includes(" - ")) {
+        let indexEnd = getNTHOccurence(songID, " - ", 1);
+        let songName = songID.slice(0, indexEnd);
+        return songName;
+    }
+    return "N/A";
+}
 
+function getArtistFromSongID(songID) {
+    if (songID.includes(" - ")) {
+        let startIndex = getNTHOccurence(songID, " - ", 1);
+        let indexEnd = getNTHOccurence(songID, " - ", 2);
+        let songArtist = songID.slice(startIndex + 2, indexEnd);
+        return songArtist;
+    }
+    return "N/A";
+}
+
+function getAlbumFromSongID(songID) {
+    if (songID.includes(" - ")) {
+        let startIndex = getNTHOccurence(songID, " - ", 2);
+        let indexEnd = getNTHOccurence(songID, " - ", 3);
+        let songAlbum = songID.slice(startIndex + 2, indexEnd);
+        return songAlbum;
+    }
+    return "N/A";
+}
+
+function getNTHOccurence(string, subString, i) {
+    return string.split(subString, i).join(subString).length;
+}
+
+function rgb_to_decimal(r, g, b) {
+    return (r << 16) + (g << 8) + b
+}
+
+
+const addFieldIfValid = (name, value, embed) => {
+    if (value !== "N/A") {
+        embed.addFields({ name, value, inline: false });
+    }
+};
 
 
 
@@ -182,6 +301,7 @@ function safeText(value, fallback = "N/A") {
     return String(value);
 }
 
+
 async function safeReply(interaction, payload) {
     try {
         if (interaction.replied || interaction.deferred) {
@@ -212,7 +332,7 @@ async function safeSendLyrics(interaction, lyrics) {
         const file = new AttachmentBuilder(filePath);
 
         if (interaction.channel?.send) {
-            await interaction.channel.send({ files: [file] });
+            await interaction.channel.send({ message: "# Synced Lyrics", files: [file] });
         }
 
         fs.unlinkSync(filePath);
@@ -223,6 +343,7 @@ async function safeSendLyrics(interaction, lyrics) {
         });
     }
 }
+
 
 async function getSongData() {
     try {
