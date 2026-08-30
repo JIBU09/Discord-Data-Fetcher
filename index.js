@@ -1,6 +1,7 @@
 const { token, clientId, guildId } = require("./config.json");
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Embed, EmbedBuilder, AttachmentBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Embed, EmbedBuilder, AttachmentBuilder, Component, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
 const fs = require('fs');
+const { type } = require("os");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -55,163 +56,227 @@ const rest = new REST({ version: "10" }).setToken(token);
 
 
 client.on("interactionCreate", async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
+    try {
+        if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === "song") {
-        const songID = interaction.options.getString("songid");
-        const currentSong = await getSongData();
-        const songIDToUse = songID || currentSong?.songID;
+        if (interaction.commandName === "song") {
+            const songID = interaction.options.getString("songid");
+            const currentSong = await getSongData();
+            const songIDToUse = songID || currentSong?.songID;
 
-        if (!songIDToUse) {
-            await safeReply(interaction, {
-                embeds: [new EmbedBuilder().setTitle("Couldn't find the song").setColor("Red")]
-            });
+            if (!songIDToUse) {
+                await safeReply(interaction, {
+                    embeds: [new EmbedBuilder().setTitle("Couldn't find the song").setColor("Red")]
+                });
+                return;
+            }
+
+            const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
+
+            if (songID && (!currentCustomSongData || Object.keys(currentCustomSongData).length === 0)) {
+                await safeReply(interaction, {
+                    embeds: [new EmbedBuilder().setTitle("No custom data for this song").setColor("Red")]
+                });
+                return;
+            }
+
+            let title;
+            let artist;
+            let album;
+            let coverUrl;
+            let footerSongID;
+
+            let customUrl;
+            let customLrcLib;
+            let ogTitle;
+            let altTitles;
+            let customArtist;
+            let customAlbum;
+            let altAlbums;
+
+
+            let url;
+
+
+
+            if (!songID) {
+                // Ohne Song ID || Current Playing
+
+                coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : isValidHttpUrl(currentSong.cover_URL) ? currentSong.cover_URL : null;
+                title = safeText(currentSong.title, currentCustomSongData.default_title) || "";
+                artist = safeText(currentSong.artist);
+                album = safeText(currentSong.album);
+                url = `/songs/stats?song=${encodeURIComponent(getSongStatsID(currentSong.title, currentSong.artist))}&range=all_time`;
+
+            } else {
+                coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : null;
+                title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
+                artist = safeText(getArtistFromSongID(songIDToUse));
+                album = safeText(getAlbumFromSongID(songIDToUse));
+                url = `/songs/stats?song=${encodeURIComponent(getSongStatsID(getTitleFromSongID(songIDToUse), getArtistFromSongID(songIDToUse)))}&range=all_time`;
+            }
+
+
+            footerSongID = safeText(songIDToUse);
+            customUrl = safeText(currentCustomSongData.custom_url);
+            customLrcLib = safeText(currentCustomSongData.custom_lrclib);
+            ogTitle = safeText(currentCustomSongData.default_title);
+            altTitles = Array.isArray(currentCustomSongData.alternative_titles)
+                ? currentCustomSongData.alternative_titles
+                    .filter(Boolean)
+                    .map(title => `- ${title}`)
+                    .join("\n") || "N/A"
+                : "N/A";
+
+            customArtist = safeText(currentCustomSongData.custom_artist);
+            customAlbum = safeText(currentCustomSongData.custom_album);
+            altAlbums = Array.isArray(currentCustomSongData.alternative_albums)
+                ? currentCustomSongData.alternative_albums
+                    .filter(Boolean)
+                    .map(title => `- ${title}`)
+                    .join("\n") || "N/A"
+                : "N/A";
+            customLyrics = safeText(currentCustomSongData.custom_lyrics);
+            customSyncedLyrics = safeText(currentCustomSongData.custom_synced_lyrics);
+
+
+            let statsData = null;
+            try {
+                const res = await songStatsApiGet(url);
+                if (res && res.data) {
+                    statsData = res.data;
+                }
+            } catch (err) {
+                console.error("Song stats request failed:", err);
+            }
+
+            const songInfoEmbed = new EmbedBuilder()
+                .setTitle(title)
+                .setColor("Blue")
+                .setAuthor({ "name": artist })
+                .setFooter({ text: `Song ID: ${footerSongID}` });
+
+            if (currentSong && currentSong.dominant_Color) {
+                let [r, g, b] = currentSong.dominant_Color
+                songInfoEmbed.setColor(rgb_to_decimal(r, g, b));
+            }
+            if (coverUrl) {
+                songInfoEmbed.setThumbnail(coverUrl);
+            }
+            addFieldIfValid("Album", album, songInfoEmbed, false);
+            addFieldIfValid("Default Title", ogTitle, songInfoEmbed, false);
+            addFieldIfValid("Alternative Titles", altTitles, songInfoEmbed, false);
+            addFieldIfValid("Custom Genius URL", customUrl, songInfoEmbed, false);
+            addFieldIfValid("Custom LRCLIB Search", customLrcLib, songInfoEmbed, false);
+            addFieldIfValid("Custom Artist", customArtist, songInfoEmbed, false);
+            addFieldIfValid("Custom Album", customAlbum, songInfoEmbed, false);
+            addFieldIfValid("Alternative Albums", altAlbums, songInfoEmbed, false);
+
+            if (customLyrics !== "N/A") {
+                songInfoEmbed.addFields({ name: "Has Custom Lyrics", value: "", inline: false });
+            }
+            if (customSyncedLyrics !== "N/A") {
+                songInfoEmbed.addFields({ name: "Has Custom Synced Lyrics", value: "", inline: false });
+            }
+
+            if (statsData) {
+                addFieldIfValid("Plays", statsData.plays + "", songInfoEmbed, true);
+                addFieldIfValid("Minutes", Math.floor(statsData.minutes) + "", songInfoEmbed, true);
+                addFieldIfValid("Source", statsData.source ? String(statsData.source).toUpperCase() : "UNKNOWN", songInfoEmbed, true);
+            }
+
+            /*const copyIDButton = new ButtonBuilder().setCustomId('copy_song_id').setLabel("Copy SongID").setStyle(ButtonStyle.Secondary);
+            const row = new ActionRowBuilder().addComponents(copyIDButton);*/
+
+            await safeReply(interaction, { embeds: [songInfoEmbed]/*, components: [row]*/ });
             return;
         }
 
-        const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
+        if (interaction.commandName === "lyrics") {
+            const songID = interaction.options.getString("songid");
+            const currentSong = await getSongData();
+            const songIDToUse = songID || currentSong?.songID;
 
-        let title;
-        let artist;
-        let album;
-        let coverUrl;
-        let footerSongID;
+            if (!songIDToUse) {
+                await safeReply(interaction, {
+                    embeds: [new EmbedBuilder().setTitle("Couldn't find the song").setColor("Red")]
+                });
+                return;
+            }
 
-        let customUrl;
-        let customLrcLib;
-        let ogTitle;
-        let altTitles;
-        let customArtist;
-        let customAlbum;
-        let altAlbums;
+            const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
 
+            if (songID && (!currentCustomSongData || Object.keys(currentCustomSongData).length === 0)) {
+                await safeReply(interaction, {
+                    embeds: [new EmbedBuilder().setTitle("No custom data for this song").setColor("Red")]
+                });
+                return;
+            }
 
-
-        if (!songID) {
-            // Ohne Song ID || Current Playing
-            coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : isValidHttpUrl(currentSong.cover_URL) ? currentSong.cover_URL : null;
-            title = safeText(currentSong.title, currentCustomSongData.default_title) || "";
-            artist = safeText(currentSong.artist);
-            album = safeText(currentSong.album);
-
-        } else {
-            coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : null;
-            title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
-            artist = safeText(getArtistFromSongID(songIDToUse));
-            album = safeText(getAlbumFromSongID(songIDToUse));
+            await interaction.reply("# Synced Lyrics");
+            if (currentCustomSongData.custom_synced_lyrics) {
+                await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics);
+            }
         }
 
+        if (interaction.commandName === "covers") {
+            await interaction.deferReply();
 
+            const coversSongID = interaction.options.getString("songid");
+            const currentSong = coversSongID ? null : await getSongData();
+            const songIdToUse = coversSongID || currentSong?.songID;
 
-        footerSongID = safeText(songIDToUse);
-        customUrl = safeText(currentCustomSongData.custom_url);
-        customLrcLib = safeText(currentCustomSongData.custom_lrclib);
-        ogTitle = safeText(currentCustomSongData.default_title);
-        altTitles = Array.isArray(currentCustomSongData.alternative_titles)
-            ? currentCustomSongData.alternative_titles
-                .filter(Boolean)
-                .map(title => `- ${title}`)
-                .join("\n") || "N/A"
-            : "N/A";
+            if (!songIdToUse) {
+                await interaction.editReply("Song not found").catch(() => { });
+                return;
+            }
 
-        customArtist = safeText(currentCustomSongData.custom_artist);
-        customAlbum = safeText(currentCustomSongData.custom_album);
-        altAlbums = Array.isArray(currentCustomSongData.alternative_albums)
-            ? currentCustomSongData.alternative_albums
-                .filter(Boolean)
-                .map(title => `- ${title}`)
-                .join("\n") || "N/A"
-            : "N/A";
+            const selectedSongData = await getCustomSongData(songIdToUse) || {};
 
+            if (coversSongID && (!selectedSongData || Object.keys(selectedSongData).length === 0)) {
+                await interaction.editReply("No covers were found for this song").catch(() => { });
+                return;
+            }
 
+            const coverUrls = [
+                selectedSongData?.custom_cover_url,
+                ...(selectedSongData?.alternative_cover_urls || [])
+            ]
+                .filter(isValidHttpUrl);
 
+            if (coverUrls.length === 0) {
+                await interaction.editReply("No covers were found or this song").catch(() => { });
+                return;
+            }
 
+            try {
+                await interaction.editReply(coverUrls.slice(0, 5).join("\n"));
 
-        const songInfoEmbed = new EmbedBuilder()
-            .setTitle(title)
-            .setColor("Blue")
-            .setAuthor({ "name": artist })
-            .setFooter({ text: `Song ID: ${footerSongID}` });
-
-        if (currentSong.dominant_Color) {
-            let [r, g, b] = currentSong.dominant_Color
-            songInfoEmbed.setColor(rgb_to_decimal(r, g, b));
+                for (let i = 5; i < coverUrls.length; i += 5) {
+                    await interaction.followUp({ content: coverUrls.slice(i, i + 5).join("\n") });
+                }
+            } catch (err) {
+                console.error("Error while sending cover URLs:", err);
+                await interaction.followUp({ content: "Covers couldn't be send correctly. Please try again" }).catch(() => { });
+            }
         }
-        if (coverUrl) {
-            songInfoEmbed.setThumbnail(coverUrl);
-        }
-
-        addFieldIfValid("Default Title", ogTitle, songInfoEmbed);
-        addFieldIfValid("Album", album, songInfoEmbed);
-        addFieldIfValid("Custom Genius URL", customUrl, songInfoEmbed);
-        addFieldIfValid("Custom LRCLIB Search", customLrcLib, songInfoEmbed);
-        addFieldIfValid("Alternative Titles", altTitles, songInfoEmbed);
-        addFieldIfValid("Custom Artist", customArtist, songInfoEmbed);
-        addFieldIfValid("Custom Album", customAlbum, songInfoEmbed);
-        addFieldIfValid("Alternative Albums", altAlbums, songInfoEmbed);
-
-
-
-        await safeReply(interaction, { embeds: [songInfoEmbed] });
-
-        return;
-    }
-
-    if (interaction.commandName === "lyrics") {
-        const songID = interaction.options.getString("songid");
-        const currentSong = await getSongData();
-        const songIDToUse = songID || currentSong?.songID;
-
-        if (!songIDToUse) {
-            await safeReply(interaction, {
-                embeds: [new EmbedBuilder().setTitle("Couldn't find the song").setColor("Red")]
-            });
-            return;
-        }
-
-        const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
-        await interaction.reply("# Synced Lyrics");
-        if (currentCustomSongData.custom_synced_lyrics) {
-            await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics);
-        }
-    }
-
-    if (interaction.commandName === "covers") {
-        await interaction.deferReply();
-
-        const coversSongID = interaction.options.getString("songid");
-        const currentSong = coversSongID ? null : await getSongData();
-        const songIdToUse = coversSongID || currentSong?.songID;
-
-        if (!songIdToUse) {
-            await interaction.editReply("Ich konnte keinen Song finden.").catch(() => { });
-            return;
-        }
-
-        const selectedSongData = await getCustomSongData(songIdToUse) || {};
-        const coverUrls = [
-            selectedSongData?.custom_cover_url,
-            ...(selectedSongData?.alternative_cover_urls || [])
-        ]
-            .filter(isValidHttpUrl);
-
-        if (coverUrls.length === 0) {
-            await interaction.editReply("Für diesen Song gibt es keine Covers.").catch(() => { });
-            return;
-        }
+    } catch (error) {
+        console.error("Unhandled interaction error:", error);
 
         try {
-            await interaction.editReply(coverUrls.slice(0, 5).join("\n"));
-
-            for (let i = 5; i < coverUrls.length; i += 5) {
-                await interaction.followUp({ content: coverUrls.slice(i, i + 5).join("\n") });
+            if (interaction.replied || interaction.deferred) {
+                await interaction.followUp({
+                    embeds: [new EmbedBuilder().setTitle("An unexpected error occurred").setColor("Red")]
+                });
+            } else {
+                await interaction.reply({
+                    embeds: [new EmbedBuilder().setTitle("An unexpected error occurred").setColor("Red")]
+                });
             }
-        } catch (err) {
-            console.error("Error while sending cover URLs:", err);
-            await interaction.followUp({ content: "Die Covers konnten nicht sauber gesendet werden. Bitte versuche es erneut." }).catch(() => { });
+        } catch {
+            // ignore follow-up reply failures
         }
     }
-
 });
 
 
@@ -253,20 +318,39 @@ function rgb_to_decimal(r, g, b) {
 }
 
 
-const addFieldIfValid = (name, value, embed) => {
+const addFieldIfValid = (name, value, embed, inline) => {
     if (value !== "N/A") {
-        embed.addFields({ name, value, inline: false });
+        embed.addFields({ name, value, inline: inline });
     }
 };
 
+async function songStatsApiGet(path) {
+    try {
+        const res = await fetch(spotifyStatsAPI + path);
+        if (!res.ok) {
+            throw new Error(`API error: ${res.status} ${res.statusText}`);
+        }
+        return await res.json();
+    } catch (error) {
+        console.error("Song stats API fetch failed:", error.message);
+        return null;
+    }
+}
 
 
 function getSongStatsID(title, artists) {
-    const artistStr = artists
-        .map(a => a.toLowerCase().replace(/\s+/g, ""))
+    const artistList = Array.isArray(artists)
+        ? artists
+        : typeof artists === "string"
+            ? [artists]
+            : [];
+
+    const artistStr = artistList
+        .filter(Boolean)
+        .map(a => String(a).toLowerCase().replace(/\s+/g, ""))
         .join(":");
 
-    let s = title.toLowerCase();
+    let s = String(title || "").toLowerCase();
 
     for (const bracket of ["(", "[", "{"]) {
         const idx = s.indexOf(bracket);
@@ -391,53 +475,6 @@ async function getCustomSongData(songID) {
         return null;
     }
 }
-
-async function getSpotifyStatsData() {
-    const url = `${spotifyStatsAPI}/songs/top?limit=5&sort=plays`
-
-    try {
-        const response = await fetch(url);
-
-        if (!response.ok) {
-            throw new Error(`HTTP Error: ${response.status}`);
-            return;
-        }
-
-        const topSongs = await response.json();
-
-        //console.log(topSongs.data);
-
-        return topSongs.data;
-    } catch (error) {
-        console.error("Fetching custom data failed:", error.message);
-    }
-}
-
-async function getSpotifySongStatsData(song_id) {
-    if (!song_id) {
-        return null;
-    }
-
-    const url = `${spotifyStatsAPI}/songs/stats?song=${encodeURIComponent(song_id)}`
-
-    try {
-        const response = await fetch(url);
-
-        if (!response.ok) {
-            throw new Error(`HTTP Error: ${response.status}`);
-            return;
-        }
-
-        const songStats = await response.json();
-
-        //console.log(topSongs.data);
-
-        return songStats.data;
-    } catch (error) {
-        console.error("Fetching custom data failed:", error.message);
-    }
-}
-
 
 
 client.login(token);
