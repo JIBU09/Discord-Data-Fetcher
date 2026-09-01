@@ -205,6 +205,12 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
+            let title;
+            if (!songID) {
+                title = safeText(currentSong.title, currentCustomSongData.default_title) || "";
+            } else {
+                title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
+            }
 
             if (songID && (!currentCustomSongData || Object.keys(currentCustomSongData).length === 0)) {
                 await safeReply(interaction, {
@@ -213,9 +219,12 @@ client.on("interactionCreate", async (interaction) => {
                 return;
             }
 
-            await interaction.reply("# Synced Lyrics");
-            if (currentCustomSongData.custom_synced_lyrics) {
-                await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics);
+            if (currentCustomSongData.custom_synced_lyrics && currentCustomSongData.custom_lyrics) {
+                await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics, currentCustomSongData.custom_lyrics, safeText(title + " Lyrics", " Lyrics"));
+            } else if (currentCustomSongData.custom_synced_lyrics) {
+                await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics, null, safeText(title + " Lyrics", " Lyrics"));
+            } else if (currentCustomSongData.custom_lyrics) {
+                await safeSendLyrics(interaction, currentCustomSongData.custom_lyrics, null, safeText(title + " Lyrics", " Lyrics"));
             }
         }
 
@@ -405,19 +414,33 @@ async function safeReply(interaction, payload) {
     }
 }
 
-async function safeSendLyrics(interaction, lyrics) {
-    if (!lyrics || typeof lyrics !== "string" || lyrics.trim() === "") {
+async function safeSendLyrics(interaction, synced_lyrics, custom_lyrics, song_title) {
+    if (!synced_lyrics || typeof synced_lyrics !== "string" || synced_lyrics.trim() === "") {
         return;
     }
 
     try {
         const filePath = './synced_lyrics.txt';
-        fs.writeFileSync(filePath, lyrics, 'utf8');
+        const filePath2 = './lyrics.txt';
+        let cutLyrics = synced_lyrics.replace(/<[^>]*>|\[[^\]]*\]/g, "");
+        fs.writeFileSync(filePath, synced_lyrics, 'utf8');
+        fs.writeFileSync(filePath2, cutLyrics, 'utf8');
         const file = new AttachmentBuilder(filePath);
+        const file2 = new AttachmentBuilder(filePath2);
 
-        if (interaction.channel?.send) {
-            await interaction.channel.send({ message: "# Synced Lyrics", files: [file] });
+        if (custom_lyrics && typeof custom_lyrics === "string" && custom_lyrics.trim() !== "") {
+            const filePath3 = './custom_lyrics.txt';
+            fs.writeFileSync(filePath3, custom_lyrics, 'utf8');
+            const file3 = new AttachmentBuilder(filePath3);
+            if (interaction.channel?.send) {
+                await safeReply(interaction, { content: "# " + song_title, files: [file, file2, file3] });
+            }
+        } else {
+            if (interaction.channel?.send) {
+                await safeReply(interaction, { content: "# " + song_title, files: [file, file2] });
+            }
         }
+
 
         fs.unlinkSync(filePath);
     } catch (err) {
