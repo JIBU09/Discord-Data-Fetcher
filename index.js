@@ -81,16 +81,6 @@ const commands = [
                 .setDescription("A text file containing lyrics, such as message.txt")
                 .setRequired(false)
         )
-        .addStringOption(option =>
-            option
-                .setName("output")
-                .setDescription("Choose how to receive the cleaned lyrics (default: TXT file)")
-                .setRequired(false)
-                .addChoices(
-                    { name: "Messages", value: "messages" },
-                    { name: "TXT file", value: "txt" }
-                )
-        )
         .toJSON()
 ];
 
@@ -114,7 +104,6 @@ client.on("interactionCreate", async (interaction) => {
         if (interaction.commandName === "cleanlyrics") {
             const lyricsInput = interaction.options.getString("lyrics");
             const lyricsFile = interaction.options.getAttachment("file");
-            const output = interaction.options.getString("output");
 
             if (Boolean(lyricsInput) === Boolean(lyricsFile)) {
                 await safeReply(interaction, {
@@ -140,36 +129,10 @@ client.on("interactionCreate", async (interaction) => {
                 return;
             }
 
-            const sendMessages = output === "messages";
-            const sendFile = !output || output === "txt";
-
-            if (sendMessages) {
-                const chunks = splitLyricsIntoMessages(cleanedLyrics);
-                await interaction.editReply({
-                    content: chunks[0],
-                    allowedMentions: { parse: [] }
-                });
-                for (const chunk of chunks.slice(1)) {
-                    await interaction.followUp({
-                        content: chunk,
-                        allowedMentions: { parse: [] }
-                    });
-                }
-            }
-
-            if (sendFile) {
-                const file = new AttachmentBuilder(Buffer.from(cleanedLyrics, "utf8"), {
-                    name: "cleaned-lyrics.txt"
-                });
-                const payload = { files: [file] };
-                if (sendMessages) {
-                    await interaction.followUp({
-                        ...payload,
-                    });
-                } else {
-                    await interaction.editReply(payload);
-                }
-            }
+            const file = new AttachmentBuilder(Buffer.from(cleanedLyrics, "utf8"), {
+                name: "cleaned-lyrics.txt"
+            });
+            await interaction.editReply({ files: [file] });
             return;
         }
 
@@ -441,7 +404,7 @@ client.on("interactionCreate", async (interaction) => {
 
         if (interaction.commandName === "lyrics") {
             const songID = interaction.options.getString("songid");
-            const lyricsType = interaction.options.getString("type") || "all";
+            const selectedLyricsType = interaction.options.getString("type");
             await interaction.deferReply();
 
             const currentSong = await getSongData();
@@ -455,6 +418,7 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             const currentCustomSongData = await getCustomSongData(songIDToUse) || {};
+            const lyricsType = selectedLyricsType || (songID ? "all" : "current");
             let title;
             if (!songID) {
                 title = safeText(currentSong.title, currentCustomSongData.default_title) || "";
@@ -462,11 +426,14 @@ client.on("interactionCreate", async (interaction) => {
                 title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
             }
 
-            let [r, g, b] = currentSong.dominant_Color
-            const lyricFiles = buildLyricsFiles(currentCustomSongData, lyricsType);
+            const lyricFiles = buildLyricsFiles(
+                currentCustomSongData,
+                lyricsType,
+                songID ? null : currentSong?.lyrics
+            );
             const resolvedTrack = await getResolvedTrack(songIDToUse);
             const lyricsEmbed = new EmbedBuilder()
-                .setColor(rgb_to_decimal(r, g, b))
+                .setColor(getSongColor(currentSong))
                 .setTitle(lyricFiles.length === 0
                     ? `No lyrics found for ${title}`.slice(0, 256)
                     : `Found ${lyricFiles.length} ${lyricFiles.length === 1 ? "lyric" : "lyrics"} for ${title}`.slice(0, 256))
@@ -522,11 +489,10 @@ client.on("interactionCreate", async (interaction) => {
             } else {
                 title = safeText(getTitleFromSongID(songIdToUse), selectedSongData.default_title) || "";
             }
-            let [r, g, b] = currentSong.dominant_Color
             try {
                 const coversEmbed = new EmbedBuilder()
                     .setTitle(`Found ${coverUrls.length} ${coverUrls.length === 1 ? "cover" : "covers"} for ${title}`.slice(0, 256))
-                    .setColor(rgb_to_decimal(r, g, b))
+                    .setColor(getSongColor(currentSong))
                     .addFields(
                         { name: "Song ID", value: songIdToUse.slice(0, 1024), inline: false },
                         { name: "Track ID", value: (resolvedTrack?.id ?? "unavailable").slice(0, 1024), inline: false }
@@ -598,6 +564,15 @@ function getNTHOccurence(string, subString, i) {
 
 function rgb_to_decimal(r, g, b) {
     return (r << 16) + (g << 8) + b
+}
+
+function getSongColor(songData) {
+    const color = songData?.dominant_Color;
+    if (Array.isArray(color) && color.length === 3 && color.every(Number.isFinite)) {
+        return rgb_to_decimal(...color);
+    }
+
+    return "Blue";
 }
 
 
@@ -727,29 +702,6 @@ function cleanLyrics(lyrics) {
         .trim();
 }
 
-function splitLyricsIntoMessages(lyrics) {
-    const chunks = [];
-    let remaining = lyrics;
-
-    while (remaining.length > 0) {
-        if (remaining.length <= 2000) {
-            chunks.push(remaining);
-            break;
-        }
-
-        let splitAt = remaining.lastIndexOf("\n", 2000);
-        if (splitAt <= 0) {
-            splitAt = 2000;
-        }
-
-        chunks.push(remaining.slice(0, splitAt));
-        remaining = remaining.slice(splitAt).replace(/^\n/, "");
-    }
-
-    return chunks;
-}
-
-
 async function safeReply(interaction, payload) {
     try {
         if (interaction.replied || interaction.deferred) {
@@ -769,7 +721,7 @@ async function safeReply(interaction, payload) {
     }
 }
 
-function buildLyricsFiles(songData, type) {
+function buildLyricsFiles(songData, type, geniusLyrics) {
     const files = [];
     const syncedLyrics = typeof songData?.custom_synced_lyrics === "string"
         ? songData.custom_synced_lyrics.trim()
@@ -779,17 +731,22 @@ function buildLyricsFiles(songData, type) {
         : "";
     const plainLyrics = syncedLyrics.replace(/<[^>]*>|\[[^\]]*\]/g, "").trim();
     const cleanedLyrics = syncedLyrics ? cleanLyrics(syncedLyrics) : "";
+    const currentGeniusLyrics = typeof geniusLyrics === "string" ? geniusLyrics.trim() : "";
 
-    if ((type === "all" || type === "synced") && syncedLyrics) {
+    if ((type === "all" || type === "current") && currentGeniusLyrics) {
+        files.push({ name: "genius-lyrics.txt", content: currentGeniusLyrics });
+    }
+
+    if ((type === "all" || type === "current" || type === "synced") && syncedLyrics) {
         files.push({ name: "synced-lyrics.txt", content: syncedLyrics });
     }
-    if ((type === "all" || type === "lyrics") && plainLyrics) {
+    if ((type === "all" || type === "lyrics" || (type === "current" && !currentGeniusLyrics)) && plainLyrics) {
         files.push({ name: "lyrics.txt", content: plainLyrics });
     }
-    if (type === "cleaned" && cleanedLyrics) {
+    if ((type === "all" || type === "current" || type === "cleaned") && cleanedLyrics) {
         files.push({ name: "cleaned-lyrics.txt", content: cleanedLyrics });
     }
-    if ((type === "all" || type === "custom") && customLyrics) {
+    if ((type === "all" || type === "current" || type === "custom") && customLyrics) {
         files.push({ name: "custom-lyrics.txt", content: customLyrics });
     }
 
