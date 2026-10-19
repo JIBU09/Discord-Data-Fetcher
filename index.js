@@ -1,6 +1,5 @@
 const { token, clientId, guildId } = require("./config.json");
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Embed, EmbedBuilder, AttachmentBuilder, Component, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
-const fs = require('fs');
 const { type } = require("os");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -42,6 +41,18 @@ const commands = [
                 .setName("songid")
                 .setDescription("Get lyrics from this song")
                 .setRequired(false)
+        )
+        .addStringOption(option =>
+            option
+                .setName("type")
+                .setDescription("Choose which lyrics to receive")
+                .setRequired(false)
+                .addChoices(
+                    { name: "All lyrics", value: "all" },
+                    { name: "Custom lyrics", value: "custom" },
+                    { name: "Synced lyrics", value: "synced" },
+                    { name: "Lyrics (without timestamps)", value: "lyrics" }
+                )
         )
         .toJSON(),
     new SlashCommandBuilder()
@@ -429,11 +440,14 @@ client.on("interactionCreate", async (interaction) => {
 
         if (interaction.commandName === "lyrics") {
             const songID = interaction.options.getString("songid");
+            const lyricsType = interaction.options.getString("type") || "all";
+            await interaction.deferReply();
+
             const currentSong = await getSongData();
             const songIDToUse = songID || currentSong?.songID;
 
             if (!songIDToUse) {
-                await safeReply(interaction, {
+                await interaction.editReply({
                     embeds: [new EmbedBuilder().setTitle("Couldn't find the song").setColor("Red")]
                 });
                 return;
@@ -447,19 +461,26 @@ client.on("interactionCreate", async (interaction) => {
                 title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
             }
 
-            if (songID && (!currentCustomSongData || Object.keys(currentCustomSongData).length === 0)) {
-                await safeReply(interaction, {
-                    embeds: [new EmbedBuilder().setTitle("No custom data for this song").setColor("Red")]
-                });
-                return;
-            }
+            let [r, g, b] = currentSong.dominant_Color
+            const lyricFiles = buildLyricsFiles(currentCustomSongData, lyricsType);
+            const resolvedTrack = await getResolvedTrack(songIDToUse);
+            const lyricsEmbed = new EmbedBuilder()
+                .setColor(rgb_to_decimal(r, g, b))
+                .setTitle(lyricFiles.length === 0
+                    ? `No lyrics found for ${title}`.slice(0, 256)
+                    : `Found ${lyricFiles.length} ${lyricFiles.length === 1 ? "lyric" : "lyrics"} for ${title}`.slice(0, 256))
+                .addFields(
+                    { name: "Song ID", value: songIDToUse.slice(0, 1024), inline: false },
+                    { name: "Track ID", value: (resolvedTrack?.id ?? "unavailable").slice(0, 1024), inline: false }
+                );
 
-            if (currentCustomSongData.custom_synced_lyrics && currentCustomSongData.custom_lyrics) {
-                await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics, currentCustomSongData.custom_lyrics, safeText(title + " Lyrics", " Lyrics"));
-            } else if (currentCustomSongData.custom_synced_lyrics) {
-                await safeSendLyrics(interaction, currentCustomSongData.custom_synced_lyrics, null, safeText(title + " Lyrics", " Lyrics"));
-            } else if (currentCustomSongData.custom_lyrics) {
-                await safeSendLyrics(interaction, currentCustomSongData.custom_lyrics, null, safeText(title + " Lyrics", " Lyrics"));
+            await interaction.editReply({ embeds: [lyricsEmbed] });
+            if (lyricFiles.length > 0) {
+                await interaction.followUp({
+                    files: lyricFiles.map(({ name, content }) =>
+                        new AttachmentBuilder(Buffer.from(content, "utf8"), { name })
+                    )
+                });
             }
         }
 
@@ -494,11 +515,21 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             const resolvedTrack = await getResolvedTrack(songIdToUse);
+            let title;
+            if (!coversSongID) {
+                title = safeText(currentSong.title, selectedSongData.default_title) || "";
+            } else {
+                title = safeText(getTitleFromSongID(songIdToUse), selectedSongData.default_title) || "";
+            }
+            let [r, g, b] = currentSong.dominant_Color
             try {
                 const coversEmbed = new EmbedBuilder()
-                    .setTitle(`Found ${coverUrls.length} covers for ${songIdToUse}`)
-                    .setColor("Green")
-                    .setFooter({ text: formatSongId(songIdToUse, resolvedTrack?.id) });
+                    .setTitle(`Found ${coverUrls.length} ${coverUrls.length === 1 ? "cover" : "covers"} for ${title}`.slice(0, 256))
+                    .setColor(rgb_to_decimal(r, g, b))
+                    .addFields(
+                        { name: "Song ID", value: songIdToUse.slice(0, 1024), inline: false },
+                        { name: "Track ID", value: (resolvedTrack?.id ?? "unavailable").slice(0, 1024), inline: false }
+                    );
 
                 await interaction.editReply({ embeds: [coversEmbed] });
                 await interaction.followUp({ content: coverUrls.slice(0, 5).join("\n") });
@@ -737,41 +768,27 @@ async function safeReply(interaction, payload) {
     }
 }
 
-async function safeSendLyrics(interaction, synced_lyrics, custom_lyrics, song_title) {
-    if (!synced_lyrics || typeof synced_lyrics !== "string" || synced_lyrics.trim() === "") {
-        return;
+function buildLyricsFiles(songData, type) {
+    const files = [];
+    const syncedLyrics = typeof songData?.custom_synced_lyrics === "string"
+        ? songData.custom_synced_lyrics.trim()
+        : "";
+    const customLyrics = typeof songData?.custom_lyrics === "string"
+        ? songData.custom_lyrics.trim()
+        : "";
+    const plainLyrics = syncedLyrics.replace(/<[^>]*>|\[[^\]]*\]/g, "").trim();
+
+    if ((type === "all" || type === "synced") && syncedLyrics) {
+        files.push({ name: "synced-lyrics.txt", content: syncedLyrics });
+    }
+    if ((type === "all" || type === "lyrics") && plainLyrics) {
+        files.push({ name: "lyrics.txt", content: plainLyrics });
+    }
+    if ((type === "all" || type === "custom") && customLyrics) {
+        files.push({ name: "custom-lyrics.txt", content: customLyrics });
     }
 
-    try {
-        const filePath = './synced_lyrics.txt';
-        const filePath2 = './lyrics.txt';
-        let cutLyrics = synced_lyrics.replace(/<[^>]*>|\[[^\]]*\]/g, "");
-        fs.writeFileSync(filePath, synced_lyrics, 'utf8');
-        fs.writeFileSync(filePath2, cutLyrics, 'utf8');
-        const file = new AttachmentBuilder(filePath);
-        const file2 = new AttachmentBuilder(filePath2);
-
-        if (custom_lyrics && typeof custom_lyrics === "string" && custom_lyrics.trim() !== "") {
-            const filePath3 = './custom_lyrics.txt';
-            fs.writeFileSync(filePath3, custom_lyrics, 'utf8');
-            const file3 = new AttachmentBuilder(filePath3);
-            if (interaction.channel?.send) {
-                await safeReply(interaction, { content: "# " + song_title, files: [file, file2, file3] });
-            }
-        } else {
-            if (interaction.channel?.send) {
-                await safeReply(interaction, { content: "# " + song_title, files: [file, file2] });
-            }
-        }
-
-
-        fs.unlinkSync(filePath);
-    } catch (err) {
-        console.error("Error sending text file:", err);
-        await safeReply(interaction, {
-            embeds: [new EmbedBuilder().setTitle("Couldn't send the file").setColor("Red")]
-        });
-    }
+    return files;
 }
 
 
