@@ -51,7 +51,8 @@ const commands = [
                     { name: "All lyrics", value: "all" },
                     { name: "Custom lyrics", value: "custom" },
                     { name: "Synced lyrics", value: "synced" },
-                    { name: "Lyrics (without timestamps)", value: "lyrics" }
+                    { name: "Lyrics (without timestamps)", value: "lyrics" },
+                    { name: "Cleaned lyrics", value: "cleaned" }
                 )
         )
         .toJSON(),
@@ -777,12 +778,16 @@ function buildLyricsFiles(songData, type) {
         ? songData.custom_lyrics.trim()
         : "";
     const plainLyrics = syncedLyrics.replace(/<[^>]*>|\[[^\]]*\]/g, "").trim();
+    const cleanedLyrics = syncedLyrics ? cleanLyrics(syncedLyrics) : "";
 
     if ((type === "all" || type === "synced") && syncedLyrics) {
         files.push({ name: "synced-lyrics.txt", content: syncedLyrics });
     }
     if ((type === "all" || type === "lyrics") && plainLyrics) {
         files.push({ name: "lyrics.txt", content: plainLyrics });
+    }
+    if (type === "cleaned" && cleanedLyrics) {
+        files.push({ name: "cleaned-lyrics.txt", content: cleanedLyrics });
     }
     if ((type === "all" || type === "custom") && customLyrics) {
         files.push({ name: "custom-lyrics.txt", content: customLyrics });
