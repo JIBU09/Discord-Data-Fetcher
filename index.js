@@ -306,8 +306,8 @@ client.on("interactionCreate", async (interaction) => {
 
             addFieldIfValid("Album", album, playingEmbed, false);
             playingEmbed.addFields(
-                { name: "Song ID", value: songID.slice(0, 1024), inline: true },
-                { name: "Track ID", value: (resolvedTrack?.id ?? "unavailable").slice(0, 1024), inline: true },
+                { name: "Song ID", value: songID.slice(0, 1024), inline: false },
+                { name: "Track ID", value: (resolvedTrack?.id ?? "unavailable").slice(0, 1024), inline: false },
                 { name: "Progress", value: progress, inline: false }
             );
             addFieldIfValid("Default Title", safeText(songData.default_title), playingEmbed, false);
