@@ -39,6 +39,42 @@ const commands = [
                 .setDescription("Get lyrics from this song")
                 .setRequired(false)
         )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName("songdata")
+        .setDescription("Get all custom data, lyrics, and covers of a song")
+        .addStringOption(option =>
+            option
+                .setName("songid")
+                .setDescription("Song ID to get data from")
+                .setRequired(true)
+        )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName("cleanlyrics")
+        .setDescription("Clean lyrics from section labels and bracketed content")
+        .addStringOption(option =>
+            option
+                .setName("lyrics")
+                .setDescription("Lyrics to clean")
+                .setRequired(false)
+        )
+        .addAttachmentOption(option =>
+            option
+                .setName("file")
+                .setDescription("A text file containing lyrics, such as message.txt")
+                .setRequired(false)
+        )
+        .addStringOption(option =>
+            option
+                .setName("output")
+                .setDescription("Choose how to receive the cleaned lyrics (default: TXT file)")
+                .setRequired(false)
+                .addChoices(
+                    { name: "Messages", value: "messages" },
+                    { name: "TXT file", value: "txt" }
+                )
+        )
         .toJSON()
 ];
 
@@ -58,6 +94,165 @@ const rest = new REST({ version: "10" }).setToken(token);
 client.on("interactionCreate", async (interaction) => {
     try {
         if (!interaction.isChatInputCommand()) return;
+
+        if (interaction.commandName === "cleanlyrics") {
+            const lyricsInput = interaction.options.getString("lyrics");
+            const lyricsFile = interaction.options.getAttachment("file");
+            const output = interaction.options.getString("output");
+
+            if (Boolean(lyricsInput) === Boolean(lyricsFile)) {
+                await safeReply(interaction, {
+                    content: "Bitte gib die Lyrics entweder als Argument oder als Datei an."
+                });
+                return;
+            }
+
+            await interaction.deferReply();
+
+            let lyrics = lyricsInput;
+            if (lyricsFile) {
+                const response = await fetch(lyricsFile.url);
+                if (!response.ok) {
+                    throw new Error(`Lyrics attachment download failed: ${response.status} ${response.statusText}`);
+                }
+                lyrics = await response.text();
+            }
+
+            const cleanedLyrics = cleanLyrics(lyrics);
+            if (!cleanedLyrics) {
+                await interaction.editReply({ content: "Nach dem Bereinigen ist kein Text übrig." });
+                return;
+            }
+
+            const sendMessages = output === "messages";
+            const sendFile = !output || output === "txt";
+
+            if (sendMessages) {
+                const chunks = splitLyricsIntoMessages(cleanedLyrics);
+                await interaction.editReply({
+                    content: chunks[0],
+                    allowedMentions: { parse: [] }
+                });
+                for (const chunk of chunks.slice(1)) {
+                    await interaction.followUp({
+                        content: chunk,
+                        allowedMentions: { parse: [] }
+                    });
+                }
+            }
+
+            if (sendFile) {
+                const file = new AttachmentBuilder(Buffer.from(cleanedLyrics, "utf8"), {
+                    name: "cleaned-lyrics.txt"
+                });
+                const payload = { files: [file] };
+                if (sendMessages) {
+                    await interaction.followUp({
+                        ...payload,
+                    });
+                } else {
+                    await interaction.editReply(payload);
+                }
+            }
+            return;
+        }
+
+        if (interaction.commandName === "songdata") {
+            const songID = interaction.options.getString("songid", true);
+            await interaction.deferReply();
+
+            const songData = await getCustomSongData(songID);
+            if (!songData || Object.keys(songData).length === 0) {
+                await interaction.editReply({
+                    embeds: [new EmbedBuilder().setTitle("No custom data for this song").setColor("Red")]
+                });
+                return;
+            }
+
+            const titleFromSongID = getTitleFromSongID(songID);
+            const artistFromSongID = getArtistFromSongID(songID);
+            const albumFromSongID = getAlbumFromSongID(songID);
+            const title = titleFromSongID !== "N/A" ? titleFromSongID : safeText(songData.default_title, songID);
+            const artist = artistFromSongID !== "N/A" ? artistFromSongID : safeText(songData.custom_artist);
+            const album = albumFromSongID !== "N/A" ? albumFromSongID : safeText(songData.custom_album);
+            const coverUrls = [
+                songData.custom_cover_url,
+                ...(Array.isArray(songData.alternative_cover_urls) ? songData.alternative_cover_urls : [])
+            ].filter(isValidHttpUrl);
+            const songEmbed = new EmbedBuilder()
+                .setTitle(title.slice(0, 256))
+                .setColor("Blue")
+                .setFooter({ text: `Song ID: ${songID}` });
+
+            if (artist !== "N/A") {
+                songEmbed.setAuthor({ name: artist.slice(0, 256) });
+            }
+            if (coverUrls.length > 0) {
+                songEmbed.setImage(coverUrls[0]);
+            }
+
+            const metadata = [
+                ["Album", album],
+                ["Default Title", songData.default_title],
+                ["Alternative Titles", songData.alternative_titles],
+                ["Custom Genius URL", songData.custom_url],
+                ["Custom LRCLIB Search", songData.custom_lrclib],
+                ["Custom Artist", songData.custom_artist],
+                ["Custom Album", songData.custom_album],
+                ["Alternative Albums", songData.alternative_albums],
+                ["Custom Cover URL", songData.custom_cover_url],
+                ["Alternative Cover URLs", songData.alternative_cover_urls]
+            ];
+
+            for (const [name, value] of metadata) {
+                const formattedValue = Array.isArray(value)
+                    ? value.filter(Boolean).join("\n")
+                    : safeText(value);
+                if (formattedValue !== "N/A" && formattedValue.trim()) {
+                    songEmbed.addFields({
+                        name,
+                        value: formattedValue.slice(0, 1024),
+                        inline: false
+                    });
+                }
+            }
+
+            if (coverUrls.length === 0) {
+                songEmbed.addFields({ name: "Covers", value: "No custom covers found", inline: false });
+            }
+
+            const files = [
+                new AttachmentBuilder(Buffer.from(JSON.stringify(songData, null, 2), "utf8"), {
+                    name: "custom-song-data.json"
+                })
+            ];
+            const availableLyrics = [];
+            if (typeof songData.custom_lyrics === "string" && songData.custom_lyrics.trim()) {
+                files.push(new AttachmentBuilder(Buffer.from(songData.custom_lyrics, "utf8"), {
+                    name: "custom-lyrics.txt"
+                }));
+                availableLyrics.push("custom-lyrics.txt");
+            }
+            if (typeof songData.custom_synced_lyrics === "string" && songData.custom_synced_lyrics.trim()) {
+                files.push(new AttachmentBuilder(Buffer.from(songData.custom_synced_lyrics, "utf8"), {
+                    name: "custom-synced-lyrics.txt"
+                }));
+                availableLyrics.push("custom-synced-lyrics.txt");
+            }
+
+            songEmbed.addFields({
+                name: "Custom Lyrics",
+                value: availableLyrics.length > 0 ? availableLyrics.join("\n") : "No custom lyrics found",
+                inline: false
+            });
+
+            await interaction.editReply({ embeds: [songEmbed], files });
+
+            for (let i = 0; i < coverUrls.length; i += 5) {
+                await interaction.followUp({ content: coverUrls.slice(i, i + 5).join("\n") });
+            }
+            return;
+        }
 
         if (interaction.commandName === "song") {
             const songID = interaction.options.getString("songid");
@@ -259,7 +454,12 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             try {
-                await interaction.editReply(coverUrls.slice(0, 5).join("\n"));
+                const coversEmbed = new EmbedBuilder()
+                    .setTitle(`Found ${coverUrls.length} covers for ${songIdToUse}`)
+                    .setColor("Green");
+
+                await interaction.editReply({ embeds: [coversEmbed] });
+                await interaction.followUp({ content: coverUrls.slice(0, 5).join("\n") });
 
                 for (let i = 5; i < coverUrls.length; i += 5) {
                     await interaction.followUp({ content: coverUrls.slice(i, i + 5).join("\n") });
@@ -392,6 +592,45 @@ function safeText(value, fallback = "N/A") {
     }
 
     return String(value);
+}
+
+function cleanLyrics(lyrics) {
+    return lyrics
+        .replace(/\r\n?/g, "\n")
+        .replace(/^[ \t]*\[.*?\][ \t\r]*$/gim, "")
+        .replace(/\[[^\]]*\]/g, "")
+        .replace(/\([^)]*\)/g, "")
+        .replace(/\{[^}]*\}/g, "")
+        .replace(/<[^>]*>/g, "")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n\s*\n+/g, "\n\n")
+        .replace(/ ,/g, ",")
+        .replace(/ \./g, ".")
+        .replace(/ !/g, "!")
+        .replace(/ \?/g, "?")
+        .trim();
+}
+
+function splitLyricsIntoMessages(lyrics) {
+    const chunks = [];
+    let remaining = lyrics;
+
+    while (remaining.length > 0) {
+        if (remaining.length <= 2000) {
+            chunks.push(remaining);
+            break;
+        }
+
+        let splitAt = remaining.lastIndexOf("\n", 2000);
+        if (splitAt <= 0) {
+            splitAt = 2000;
+        }
+
+        chunks.push(remaining.slice(0, splitAt));
+        remaining = remaining.slice(splitAt).replace(/^\n/, "");
+    }
+
+    return chunks;
 }
 
 
