@@ -6,10 +6,14 @@ const { type } = require("os");
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const API = "http://192.168.178.124:5111";
-const spotifyStatsAPI = "http://192.168.178.124:6969";
+const TRACKS_API = "http://192.168.178.124:6767/api/tracks/resolve";
 
 
 const commands = [
+    new SlashCommandBuilder()
+        .setName("playing")
+        .setDescription("Show the currently playing song and its progress")
+        .toJSON(),
     new SlashCommandBuilder()
         .setName("song")
         .setDescription("Get custom data of a song!")
@@ -169,6 +173,7 @@ client.on("interactionCreate", async (interaction) => {
                 return;
             }
 
+            const resolvedTrack = await getResolvedTrack(songID);
             const titleFromSongID = getTitleFromSongID(songID);
             const artistFromSongID = getArtistFromSongID(songID);
             const albumFromSongID = getAlbumFromSongID(songID);
@@ -182,7 +187,7 @@ client.on("interactionCreate", async (interaction) => {
             const songEmbed = new EmbedBuilder()
                 .setTitle(title.slice(0, 256))
                 .setColor("Blue")
-                .setFooter({ text: `Song ID: ${songID}` });
+                .setFooter({ text: formatSongId(songID, resolvedTrack?.id) });
 
             if (artist !== "N/A") {
                 songEmbed.setAuthor({ name: artist.slice(0, 256) });
@@ -254,6 +259,65 @@ client.on("interactionCreate", async (interaction) => {
             return;
         }
 
+        if (interaction.commandName === "playing") {
+            await interaction.deferReply();
+
+            const currentSong = await getSongData();
+            const songID = currentSong?.songID;
+            if (!songID) {
+                await interaction.editReply({
+                    embeds: [new EmbedBuilder().setTitle("Couldn't find the currently playing song").setColor("Red")]
+                });
+                return;
+            }
+
+            const [customSongData, liveState, resolvedTrack] = await Promise.all([
+                getCustomSongData(songID),
+                getLiveState(),
+                getResolvedTrack(songID)
+            ]);
+            const songData = customSongData || {};
+            const title = safeText(currentSong.title, safeText(songData.default_title, songID));
+            const artist = safeText(currentSong.artist, songData.custom_artist);
+            const album = safeText(currentSong.album, songData.custom_album);
+            const coverUrl = isValidHttpUrl(songData.custom_cover_url)
+                ? songData.custom_cover_url
+                : isValidHttpUrl(currentSong.cover_URL)
+                    ? currentSong.cover_URL
+                    : null;
+            const progress = formatProgress(liveState?.progress_ms, resolvedTrack?.durationMs);
+
+            const playingEmbed = new EmbedBuilder()
+                .setTitle(title.slice(0, 256))
+                .setColor("Blue");
+
+            if (artist !== "N/A") {
+                playingEmbed.setAuthor({ name: artist.slice(0, 256) });
+            }
+            if (currentSong.dominant_Color && Array.isArray(currentSong.dominant_Color)) {
+                const [r, g, b] = currentSong.dominant_Color;
+                if ([r, g, b].every(Number.isFinite)) {
+                    playingEmbed.setColor(rgb_to_decimal(r, g, b));
+                }
+            }
+            if (coverUrl) {
+                playingEmbed.setThumbnail(coverUrl);
+            }
+
+            addFieldIfValid("Album", album, playingEmbed, false);
+            playingEmbed.addFields(
+                { name: "Song ID", value: songID.slice(0, 1024), inline: true },
+                { name: "Track ID", value: (resolvedTrack?.id ?? "unavailable").slice(0, 1024), inline: true },
+                { name: "Progress", value: progress, inline: false }
+            );
+            addFieldIfValid("Default Title", safeText(songData.default_title), playingEmbed, false);
+            addFieldIfValid("Custom Artist", safeText(songData.custom_artist), playingEmbed, false);
+            addFieldIfValid("Custom Album", safeText(songData.custom_album), playingEmbed, false);
+
+            await interaction.editReply({ embeds: [playingEmbed] });
+            return;
+        }
+
         if (interaction.commandName === "song") {
             const songID = interaction.options.getString("songid");
             const currentSong = await getSongData();
@@ -275,11 +339,11 @@ client.on("interactionCreate", async (interaction) => {
                 return;
             }
 
+            const resolvedTrack = await getResolvedTrack(songIDToUse);
             let title;
             let artist;
             let album;
             let coverUrl;
-            let footerSongID;
 
             let customUrl;
             let customLrcLib;
@@ -289,11 +353,6 @@ client.on("interactionCreate", async (interaction) => {
             let customAlbum;
             let altAlbums;
 
-
-            let url;
-
-
-
             if (!songID) {
                 // Ohne Song ID || Current Playing
 
@@ -301,18 +360,15 @@ client.on("interactionCreate", async (interaction) => {
                 title = safeText(currentSong.title, currentCustomSongData.default_title) || "";
                 artist = safeText(currentSong.artist);
                 album = safeText(currentSong.album);
-                url = `/songs/stats?song=${encodeURIComponent(getSongStatsID(currentSong.title, currentSong.artist))}&range=all_time`;
 
             } else {
                 coverUrl = isValidHttpUrl(currentCustomSongData.custom_cover_url) ? currentCustomSongData.custom_cover_url : null;
                 title = safeText(getTitleFromSongID(songIDToUse), currentCustomSongData.default_title) || "";
                 artist = safeText(getArtistFromSongID(songIDToUse));
                 album = safeText(getAlbumFromSongID(songIDToUse));
-                url = `/songs/stats?song=${encodeURIComponent(getSongStatsID(getTitleFromSongID(songIDToUse), getArtistFromSongID(songIDToUse)))}&range=all_time`;
             }
 
 
-            footerSongID = safeText(songIDToUse);
             customUrl = safeText(currentCustomSongData.custom_url);
             customLrcLib = safeText(currentCustomSongData.custom_lrclib);
             ogTitle = safeText(currentCustomSongData.default_title);
@@ -335,21 +391,11 @@ client.on("interactionCreate", async (interaction) => {
             customSyncedLyrics = safeText(currentCustomSongData.custom_synced_lyrics);
 
 
-            let statsData = null;
-            try {
-                const res = await songStatsApiGet(url);
-                if (res && res.data) {
-                    statsData = res.data;
-                }
-            } catch (err) {
-                console.error("Song stats request failed:", err);
-            }
-
             const songInfoEmbed = new EmbedBuilder()
                 .setTitle(title)
                 .setColor("Blue")
                 .setAuthor({ "name": artist })
-                .setFooter({ text: `Song ID: ${footerSongID}` });
+                .setFooter({ text: formatSongId(songIDToUse, resolvedTrack?.id) });
 
             if (currentSong && currentSong.dominant_Color) {
                 let [r, g, b] = currentSong.dominant_Color
@@ -372,12 +418,6 @@ client.on("interactionCreate", async (interaction) => {
             }
             if (customSyncedLyrics !== "N/A") {
                 songInfoEmbed.addFields({ name: "Has Custom Synced Lyrics", value: "", inline: false });
-            }
-
-            if (statsData) {
-                addFieldIfValid("Plays", statsData.plays + "", songInfoEmbed, true);
-                addFieldIfValid("Minutes", Math.floor(statsData.minutes) + "", songInfoEmbed, true);
-                addFieldIfValid("Source", statsData.source ? String(statsData.source).toUpperCase() : "UNKNOWN", songInfoEmbed, true);
             }
 
             /*const copyIDButton = new ButtonBuilder().setCustomId('copy_song_id').setLabel("Copy SongID").setStyle(ButtonStyle.Secondary);
@@ -453,10 +493,12 @@ client.on("interactionCreate", async (interaction) => {
                 return;
             }
 
+            const resolvedTrack = await getResolvedTrack(songIdToUse);
             try {
                 const coversEmbed = new EmbedBuilder()
                     .setTitle(`Found ${coverUrls.length} covers for ${songIdToUse}`)
-                    .setColor("Green");
+                    .setColor("Green")
+                    .setFooter({ text: formatSongId(songIdToUse, resolvedTrack?.id) });
 
                 await interaction.editReply({ embeds: [coversEmbed] });
                 await interaction.followUp({ content: coverUrls.slice(0, 5).join("\n") });
@@ -533,46 +575,88 @@ const addFieldIfValid = (name, value, embed, inline) => {
     }
 };
 
-async function songStatsApiGet(path) {
+async function getResolvedTrack(songID) {
     try {
-        const res = await fetch(spotifyStatsAPI + path);
-        if (!res.ok) {
-            throw new Error(`API error: ${res.status} ${res.statusText}`);
+        const response = await fetch(`${TRACKS_API}?custom_id=${encodeURIComponent(songID)}`, {
+            cache: "no-store",
+            headers: {
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache"
+            }
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
         }
-        return await res.json();
+
+        const trackData = await response.json();
+        if (!trackData || typeof trackData !== "object") {
+            throw new Error("Track resolve response was not an object");
+        }
+
+        return {
+            id: trackData.id === undefined || trackData.id === null || trackData.id === ""
+                ? null
+                : String(trackData.id),
+            durationMs: Number.isFinite(Number(trackData.duration_ms)) && Number(trackData.duration_ms) > 0
+                ? Number(trackData.duration_ms)
+                : null
+        };
     } catch (error) {
-        console.error("Song stats API fetch failed:", error.message);
+        console.error(`Resolving track ID for "${songID}" failed:`, error.message);
         return null;
     }
 }
 
-
-function getSongStatsID(title, artists) {
-    const artistList = Array.isArray(artists)
-        ? artists
-        : typeof artists === "string"
-            ? [artists]
-            : [];
-
-    const artistStr = artistList
-        .filter(Boolean)
-        .map(a => String(a).toLowerCase().replace(/\s+/g, ""))
-        .join(":");
-
-    let s = String(title || "").toLowerCase();
-
-    for (const bracket of ["(", "[", "{"]) {
-        const idx = s.indexOf(bracket);
-        if (idx !== -1) {
-            s = s.slice(0, idx);
+async function getLiveState() {
+    try {
+        const response = await fetch(`${API}/live-state`, {
+            cache: "no-store",
+            headers: {
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache"
+            }
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
         }
+
+        return await response.json();
+    } catch (error) {
+        console.error("Fetching live state failed:", error.message);
+        return null;
+    }
+}
+
+function formatProgress(progressMs, durationMs) {
+    if (progressMs === null || progressMs === undefined || progressMs === "" ||
+        durationMs === null || durationMs === undefined || durationMs === "") {
+        return "Progress unavailable";
     }
 
-    s = s.replace(/\b(feat|ft|featuring|with)\b.*/i, "");
-    s = s.replace(/[^a-z0-9 ]/g, "");
-    s = s.replace(/\s+/g, " ").trim();
+    const progress = Number(progressMs);
+    const duration = Number(durationMs);
+    if (!Number.isFinite(progress) || !Number.isFinite(duration) || duration <= 0) {
+        return "Progress unavailable";
+    }
 
-    return `${artistStr}:${s.replace(/\s+/g, "")}`;
+    const clampedProgress = Math.min(Math.max(progress, 0), duration);
+    const percentage = Math.floor((clampedProgress / duration) * 100);
+    const barLength = 20;
+    const filledLength = Math.floor((percentage / 100) * barLength);
+    const bar = `${"█".repeat(filledLength)}${"░".repeat(barLength - filledLength)}`;
+
+    return `${bar}\n${formatTime(clampedProgress)} / ${formatTime(duration)}`;
+}
+
+function formatTime(milliseconds) {
+    const totalSeconds = Math.floor(milliseconds / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatSongId(songID, resolvedTrackId) {
+    return `Song ID: ${songID} | Track ID: ${resolvedTrackId ?? "unavailable"}`;
 }
 
 function isValidHttpUrl(value) {
