@@ -753,8 +753,12 @@ function buildLyricsFiles(songData, type, geniusLyrics) {
         ? songData.custom_lyrics.trim()
         : "";
     const plainLyrics = syncedLyrics.replace(/<[^>]*>|\[[^\]]*\]/g, "").trim();
-    const cleanedLyrics = syncedLyrics ? cleanLyrics(syncedLyrics) : "";
     const currentGeniusLyrics = typeof geniusLyrics === "string" ? geniusLyrics.trim() : "";
+    const cleanedSyncedLyrics = syncedLyrics ? cleanLyrics(syncedLyrics) : "";
+    const cleanedGeniusLyrics = type === "cleaned" && currentGeniusLyrics
+        ? cleanLyrics(currentGeniusLyrics)
+        : "";
+    const cleanedLyrics = cleanedSyncedLyrics || cleanedGeniusLyrics;
 
     if ((type === "all" || type === "current") && currentGeniusLyrics) {
         files.push({ name: "genius-lyrics.txt", content: currentGeniusLyrics });
