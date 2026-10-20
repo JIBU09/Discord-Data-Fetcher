@@ -81,6 +81,12 @@ const commands = [
                 .setDescription("A text file containing lyrics, such as message.txt")
                 .setRequired(false)
         )
+        .addBooleanOption(option =>
+            option
+                .setName("remove_recommendations")
+                .setDescription("Remove 'You might also like' and the 6 lines after it")
+                .setRequired(false)
+        )
         .toJSON()
 ];
 
@@ -123,7 +129,8 @@ client.on("interactionCreate", async (interaction) => {
                 lyrics = await response.text();
             }
 
-            const cleanedLyrics = cleanLyrics(lyrics);
+            const removeRecommendations = interaction.options.getBoolean("remove_recommendations") ?? false;
+            const cleanedLyrics = cleanLyrics(lyrics, removeRecommendations);
             if (!cleanedLyrics) {
                 await interaction.editReply({ content: "Nach dem Bereinigen ist kein Text übrig." });
                 return;
@@ -685,7 +692,23 @@ function safeText(value, fallback = "N/A") {
     return String(value);
 }
 
-function cleanLyrics(lyrics) {
+function cleanLyrics(lyrics, removeRecommendations = false) {
+    if (removeRecommendations) {
+        const lines = lyrics.replace(/\r\n?/g, "\n").split("\n");
+        const filteredLines = [];
+
+        for (let index = 0; index < lines.length; index++) {
+            if (lines[index].trim().toLowerCase() === "you might also like") {
+                index += 6;
+                continue;
+            }
+
+            filteredLines.push(lines[index]);
+        }
+
+        lyrics = filteredLines.join("\n");
+    }
+
     return lyrics
         .replace(/\r\n?/g, "\n")
         .replace(/^[ \t]*\[.*?\][ \t\r]*$/gim, "")
