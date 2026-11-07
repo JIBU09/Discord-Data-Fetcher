@@ -1,6 +1,7 @@
 const { token, clientId, guildId } = require("./config.json");
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Embed, EmbedBuilder, AttachmentBuilder, Component, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
 const { type } = require("os");
+const sharp = require("sharp");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -87,6 +88,16 @@ const commands = [
                 .setDescription("Remove 'You might also like' and the 6 lines after it")
                 .setRequired(false)
         )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName("gif")
+        .setDescription("Convert an image to a GIF file")
+        .addAttachmentOption(option =>
+            option
+                .setName("image")
+                .setDescription("The image to convert")
+                .setRequired(true)
+        )
         .toJSON()
 ];
 
@@ -106,6 +117,43 @@ const rest = new REST({ version: "10" }).setToken(token);
 client.on("interactionCreate", async (interaction) => {
     try {
         if (!interaction.isChatInputCommand()) return;
+
+        if (interaction.commandName === "gif") {
+            const image = interaction.options.getAttachment("image", true);
+            const supportedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+            const maxImageSize = 20 * 1024 * 1024;
+
+            if (!supportedTypes.includes(image.contentType?.split(";")[0].toLowerCase())) {
+                await safeReply(interaction, {
+                    content: "Please attach a JPG-, PNG-, WebP- or GIF-image."
+                });
+                return;
+            }
+
+            if (image.size > maxImageSize) {
+                await safeReply(interaction, {
+                    content: "Image is above the maximum size of 20 MB"
+                });
+                return;
+            }
+
+            await interaction.deferReply();
+
+            const response = await fetch(image.url);
+            if (!response.ok) {
+                throw new Error(`Image attachment download failed: ${response.status} ${response.statusText}`);
+            }
+
+            const imageBuffer = Buffer.from(await response.arrayBuffer());
+            const gifBuffer = await sharp(imageBuffer, { limitInputPixels: 40_000_000 })
+                .gif()
+                .toBuffer();
+
+            await interaction.editReply({
+                files: [new AttachmentBuilder(gifBuffer, { name: "converted.gif" })]
+            });
+            return;
+        }
 
         if (interaction.commandName === "cleanlyrics") {
             const lyricsInput = interaction.options.getString("lyrics");
