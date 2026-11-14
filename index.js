@@ -1,9 +1,54 @@
 const { token, clientId, guildId } = require("./config.json");
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, Embed, EmbedBuilder, AttachmentBuilder, Component, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
+const {
+    Client,
+    GatewayIntentBits,
+    REST,
+    Routes,
+    SlashCommandBuilder,
+    ContextMenuCommandBuilder,
+    ApplicationCommandType,
+    Embed,
+    EmbedBuilder,
+    AttachmentBuilder,
+    Component,
+    ButtonBuilder,
+    ButtonStyle,
+    ActionRowBuilder
+} = require("discord.js");
 const { type } = require("os");
 const sharp = require("sharp");
+const path = require("node:path");
+const { createAttachmentServer, createAttachmentStore } = require("./permanentAttachments");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const attachmentDatabasePath = process.env.ATTACHMENT_DB_PATH || path.join(__dirname, "data", "attachments.sqlite");
+const attachmentStore = createAttachmentStore(attachmentDatabasePath);
+const httpPort = Number(process.env.HTTP_PORT || "3000");
+if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
+    console.error("HTTP_PORT must be an integer between 1 and 65535");
+    process.exit(1);
+}
+
+let publicBaseUrl = null;
+if (process.env.PUBLIC_BASE_URL) {
+    try {
+        const parsedBaseUrl = new URL(process.env.PUBLIC_BASE_URL);
+        if (parsedBaseUrl.protocol !== "http:" ||
+            parsedBaseUrl.username ||
+            parsedBaseUrl.password ||
+            parsedBaseUrl.pathname !== "/" ||
+            parsedBaseUrl.search ||
+            parsedBaseUrl.hash) {
+            throw new Error("PUBLIC_BASE_URL must be an HTTP origin without credentials, path, query, or fragment");
+        }
+        publicBaseUrl = parsedBaseUrl.href.replace(/\/+$/, "");
+    } catch (error) {
+        console.error("Invalid PUBLIC_BASE_URL:", error.message);
+        process.exit(1);
+    }
+} else {
+    console.warn("PUBLIC_BASE_URL is unset; permanent attachment links are disabled until it is configured.");
+}
 
 const API = "http://192.168.178.124:5111";
 const TRACKS_API = "http://192.168.178.124:6767/api/tracks/resolve";
@@ -98,6 +143,10 @@ const commands = [
                 .setDescription("The image to convert")
                 .setRequired(true)
         )
+        .toJSON(),
+    new ContextMenuCommandBuilder()
+        .setName("Create permanent links")
+        .setType(ApplicationCommandType.Message)
         .toJSON()
 ];
 
@@ -113,9 +162,56 @@ const rest = new REST({ version: "10" }).setToken(token);
     }
 })();
 
+const attachmentServer = createAttachmentServer({
+    store: attachmentStore,
+    client
+});
+attachmentServer.on("error", (error) => {
+    console.error("Permanent attachment HTTP server failed:", error.message);
+    attachmentStore.close();
+    client.destroy();
+    process.exitCode = 1;
+});
+attachmentServer.listen(httpPort, "0.0.0.0", () => {
+    console.log(`Permanent attachment HTTP server listening on 0.0.0.0:${httpPort}`);
+});
+
 
 client.on("interactionCreate", async (interaction) => {
     try {
+        if (interaction.isMessageContextMenuCommand() &&
+            interaction.commandName === "Create permanent links") {
+            const message = interaction.targetMessage;
+            if (message.attachments.size === 0) {
+                await interaction.reply({
+                    content: "That message has no attachments to link.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            if (!publicBaseUrl) {
+                await interaction.reply({
+                    content: "Permanent attachment links are not configured. Set PUBLIC_BASE_URL on the bot first.",
+                    ephemeral: true
+                });
+                return;
+            }
+
+            await interaction.deferReply({ ephemeral: true });
+            const attachmentRecords = attachmentStore.addMany(
+                [...message.attachments.values()].map((attachment) => ({
+                    channel_id: message.channelId,
+                    message_id: message.id,
+                    attachment_id: attachment.id,
+                    filename: attachment.name
+                }))
+            );
+            const links = attachmentRecords.map(({ id }) => `${publicBaseUrl}/file/${id}`);
+            await interaction.editReply({ content: links.join("\n") });
+            return;
+        }
+
         if (!interaction.isChatInputCommand()) return;
 
         if (interaction.commandName === "gif") {

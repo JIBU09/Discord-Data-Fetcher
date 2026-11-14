@@ -1,4 +1,7 @@
 config.json
 lyrics.txt
 custom_lyrics.txt
+data/
+.env
+node_modules/
 commands.txt
