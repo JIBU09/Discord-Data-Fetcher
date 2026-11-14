@@ -5,7 +5,11 @@
 Open the message's context menu (right-click on desktop, or long-press on
 mobile), then select **Apps** > **Create permanent links**. The action returns
 the existing links for attachments that already have them and creates links
-immediately for attachments that do not.
+immediately for attachments that do not. It shows one embed per attachment
+with clickable local and Tailscale URLs and indicates whether the existing URL
+was reused or a new one was generated. Image attachments also use the local
+URL for the embed preview; that preview may not load when the Discord client
+cannot reach the Pi's LAN address, but the Tailscale URL remains available.
 
 To remove one, use `/delete-url` and enter its generated ID. This invalidates
 the link on both local and Tailscale addresses; it does not delete the original

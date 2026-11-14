@@ -79,10 +79,16 @@ test("reuses the existing link for the same Discord attachment", () => {
         attachment_id: "attachment-1",
         filename: "video.mp4"
     };
-    const [firstRecord] = store.addMany([attachment]);
-    const [secondRecord] = store.addMany([attachment]);
+    const first = store.addOne(attachment);
+    const second = store.addOne({
+        ...attachment,
+        channel_id: "another-channel",
+        message_id: "another-message"
+    });
 
-    assert.deepEqual(secondRecord, firstRecord);
+    assert.equal(first.reused, false);
+    assert.equal(second.reused, true);
+    assert.deepEqual(second.record, first.record);
 });
 
 test("deletes only the requested permanent URL ID", () => {
@@ -121,6 +127,14 @@ test("keeps generated IDs and metadata after reopening the SQLite database", (t)
         fs.rmSync(directory, { recursive: true, force: true });
     });
 
+    const existing = reopenedStore.addOne({
+        channel_id: "channel-1",
+        message_id: "message-1",
+        attachment_id: "attachment-1",
+        filename: "video.mp4"
+    });
+    assert.equal(existing.reused, true);
+    assert.deepEqual(existing.record, record);
     assert.deepEqual(reopenedStore.get(record.id), record);
 });
 
@@ -270,7 +284,7 @@ test("HTTP endpoint distinguishes Discord permission failures from service outag
         {
             channel_id: "unavailable-channel",
             message_id: "message-1",
-            attachment_id: "attachment-1",
+            attachment_id: "attachment-2",
             filename: "unavailable.png"
         }
     ]);

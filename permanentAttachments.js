@@ -41,6 +41,10 @@ function createAttachmentStore(databasePath) {
         CREATE INDEX IF NOT EXISTS idx_permanent_attachments_source
         ON permanent_attachments (channel_id, message_id, attachment_id)
     `);
+    database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_permanent_attachments_attachment
+        ON permanent_attachments (attachment_id)
+    `);
 
     const insertAttachment = database.prepare(`
         INSERT INTO permanent_attachments
@@ -52,18 +56,14 @@ function createAttachmentStore(databasePath) {
     const findAttachment = database.prepare(`
         SELECT id, channel_id, message_id, attachment_id, filename, created_at
         FROM permanent_attachments
-        WHERE channel_id = ? AND message_id = ? AND attachment_id = ?
+        WHERE attachment_id = ?
         ORDER BY rowid
         LIMIT 1
     `);
-    const insertAttachments = database.transaction((attachments) => attachments.map((attachment) => {
-        const existing = findAttachment.get(
-            attachment.channel_id,
-            attachment.message_id,
-            attachment.attachment_id
-        );
+    function getOrCreateAttachment(attachment) {
+        const existing = findAttachment.get(attachment.attachment_id);
         if (existing) {
-            return existing;
+            return { record: existing, reused: true };
         }
 
         for (let attempt = 0; attempt < 5; attempt++) {
@@ -78,7 +78,7 @@ function createAttachmentStore(databasePath) {
 
             try {
                 insertAttachment.run(record);
-                return record;
+                return { record, reused: false };
             } catch (error) {
                 if (error.code !== "SQLITE_CONSTRAINT_PRIMARYKEY" || attempt === 4) {
                     throw error;
@@ -86,11 +86,18 @@ function createAttachmentStore(databasePath) {
             }
         }
         throw new Error("Unable to create a unique attachment identifier");
-    }));
+    }
+
+    const insertAttachments = database.transaction((attachments) =>
+        attachments.map(getOrCreateAttachment)
+    );
 
     return {
         addMany(attachments) {
-            return insertAttachments(attachments);
+            return insertAttachments.immediate(attachments).map(({ record }) => record);
+        },
+        addOne(attachment) {
+            return insertAttachments.immediate([attachment])[0];
         },
         get(id) {
             return database.prepare(`

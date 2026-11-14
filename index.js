@@ -231,13 +231,16 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             await interaction.deferReply({ ephemeral: true });
-            const attachmentRecords = attachmentStore.addMany(
-                [...message.attachments.values()].map((attachment) => ({
-                    channel_id: message.channelId,
-                    message_id: message.id,
-                    attachment_id: attachment.id,
-                    filename: attachment.name
-                }))
+            const attachmentRecords = [...message.attachments.values()].map((attachment) =>
+                ({
+                    ...attachmentStore.addOne({
+                        channel_id: message.channelId,
+                        message_id: message.id,
+                        attachment_id: attachment.id,
+                        filename: attachment.name
+                    }),
+                    contentType: attachment.contentType
+                })
             );
             await sendAttachmentLinksToInteraction(interaction, attachmentRecords);
             return;
@@ -722,44 +725,45 @@ client.on("interactionCreate", async (interaction) => {
     }
 });
 
-function formatAttachmentLinkBlocks(records) {
-    return records.map((record, index) => {
-        const lines = [`Attachment ${index + 1}:`];
-        if (localBaseUrl) {
-            lines.push(`Local: ${localBaseUrl}/file/${record.id}`);
-        }
-        if (publicBaseUrl) {
-            lines.push(`Tailscale fallback: ${publicBaseUrl}/file/${record.id}`);
-        }
-        return lines.join("\n");
-    });
-}
+function createAttachmentEmbed({ record, reused, contentType }, index) {
+    const embed = new EmbedBuilder()
+        .setTitle(`Attachment ${index + 1}`)
+        .setDescription(reused
+            ? "Existing permanent URLs reused."
+            : "Generated local and Tailscale fallback URLs.")
+        .setColor("Blue");
 
-function chunkAttachmentLinkBlocks(records) {
-    const blocks = formatAttachmentLinkBlocks(records);
-    const chunks = [];
-    let currentChunk = "";
-
-    for (const block of blocks) {
-        const candidate = currentChunk ? `${currentChunk}\n\n${block}` : block;
-        if (candidate.length > 1800 && currentChunk) {
-            chunks.push(currentChunk);
-            currentChunk = block;
-        } else {
-            currentChunk = candidate;
+    if (localBaseUrl) {
+        const localUrl = `${localBaseUrl}/file/${record.id}`;
+        embed.addFields({
+            name: "Local URL",
+            value: `<${localUrl}>`,
+            inline: false
+        });
+        if (contentType?.startsWith("image/")) {
+            embed.setImage(localUrl);
         }
     }
-    if (currentChunk) {
-        chunks.push(currentChunk);
+    if (publicBaseUrl) {
+        embed.addFields({
+            name: "Tailscale fallback URL",
+            value: `<${publicBaseUrl}/file/${record.id}>`,
+            inline: false
+        });
     }
-    return chunks;
+
+    return embed;
 }
 
 async function sendAttachmentLinksToInteraction(interaction, records) {
-    const chunks = chunkAttachmentLinkBlocks(records);
-    await interaction.editReply({ content: chunks[0] });
-    for (const chunk of chunks.slice(1)) {
-        await interaction.followUp({ content: chunk, ephemeral: true });
+    const embeds = records.map(createAttachmentEmbed);
+    for (let offset = 0; offset < embeds.length; offset += 10) {
+        const payload = { embeds: embeds.slice(offset, offset + 10) };
+        if (offset === 0) {
+            await interaction.editReply(payload);
+        } else {
+            await interaction.followUp({ ...payload, ephemeral: true });
+        }
     }
 }
 
