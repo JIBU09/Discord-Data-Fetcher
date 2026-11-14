@@ -7,7 +7,10 @@ const { once } = require("node:events");
 const {
     createAttachmentServer,
     createAttachmentStore,
+    discoverNetworkAddresses,
     getCurrentAttachmentUrl,
+    isAllowedNetworkAddress,
+    isPrivateIpv4Address,
     isTailscaleAddress
 } = require("../permanentAttachments");
 
@@ -66,6 +69,34 @@ test("stores attachment metadata under a random ID without a CDN URL", () => {
     assert.deepEqual(store.get(record.id), record);
     assert.equal(Object.hasOwn(record, "url"), false);
     assert.equal(store.get("unknown"), undefined);
+});
+
+test("reuses the existing link for the same Discord attachment", () => {
+    const store = createStore();
+    const attachment = {
+        channel_id: "channel-1",
+        message_id: "message-1",
+        attachment_id: "attachment-1",
+        filename: "video.mp4"
+    };
+    const [firstRecord] = store.addMany([attachment]);
+    const [secondRecord] = store.addMany([attachment]);
+
+    assert.deepEqual(secondRecord, firstRecord);
+});
+
+test("deletes only the requested permanent URL ID", () => {
+    const store = createStore();
+    const [record] = store.addMany([{
+        channel_id: "channel-1",
+        message_id: "message-1",
+        attachment_id: "attachment-1",
+        filename: "video.mp4"
+    }]);
+
+    assert.equal(store.delete(record.id), true);
+    assert.equal(store.get(record.id), undefined);
+    assert.equal(store.delete(record.id), false);
 });
 
 test("keeps generated IDs and metadata after reopening the SQLite database", (t) => {
@@ -150,13 +181,29 @@ test("maps missing Discord messages and attachments to not found", async () => {
     );
 });
 
-test("allows only Tailscale IPv4 and IPv6 source addresses", () => {
+test("allows private LAN and Tailscale addresses only", () => {
     assert.equal(isTailscaleAddress("100.64.0.1"), true);
     assert.equal(isTailscaleAddress("100.127.255.254"), true);
     assert.equal(isTailscaleAddress("::ffff:100.100.10.2"), true);
     assert.equal(isTailscaleAddress("fd7a:115c:a1e0::1234"), true);
-    assert.equal(isTailscaleAddress("192.168.1.10"), false);
+    assert.equal(isPrivateIpv4Address("192.168.1.10"), true);
+    assert.equal(isPrivateIpv4Address("10.0.0.8"), true);
+    assert.equal(isPrivateIpv4Address("172.20.0.8"), true);
+    assert.equal(isPrivateIpv4Address("172.32.0.8"), false);
+    assert.equal(isAllowedNetworkAddress("192.168.1.10"), true);
+    assert.equal(isAllowedNetworkAddress("8.8.8.8"), false);
     assert.equal(isTailscaleAddress("fd7a:115c:a1e1::1234"), false);
+});
+
+test("discovers physical LAN and Tailscale IPv4 addresses", () => {
+    assert.deepEqual(discoverNetworkAddresses({
+        docker0: [{ family: "IPv4", address: "172.17.0.1", internal: false }],
+        eth0: [{ family: "IPv4", address: "192.168.1.25", internal: false }],
+        tailscale0: [{ family: "IPv4", address: "100.100.10.25", internal: false }]
+    }), {
+        localIpv4: "192.168.1.25",
+        tailscaleIpv4: "100.100.10.25"
+    });
 });
 
 test("HTTP endpoint dynamically redirects and returns not found for unknown IDs", async (t) => {
@@ -196,7 +243,7 @@ test("HTTP endpoint dynamically redirects and returns not found for unknown IDs"
     assert.equal(missingResponse.status, 404);
 });
 
-test("HTTP endpoint rejects requests from outside Tailscale", async (t) => {
+test("HTTP endpoint rejects requests outside LAN and Tailscale", async (t) => {
     const server = createAttachmentServer({
         store: createStore(),
         client: {},

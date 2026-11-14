@@ -10,44 +10,64 @@ const {
     Embed,
     EmbedBuilder,
     AttachmentBuilder,
-    Component,
-    ButtonBuilder,
-    ButtonStyle,
-    ActionRowBuilder
+    Component
 } = require("discord.js");
-const { type } = require("os");
 const sharp = require("sharp");
 const path = require("node:path");
-const { createAttachmentServer, createAttachmentStore } = require("./permanentAttachments");
+const {
+    createAttachmentServer,
+    createAttachmentStore,
+    discoverNetworkAddresses
+} = require("./permanentAttachments");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const attachmentDatabasePath = process.env.ATTACHMENT_DB_PATH || path.join(__dirname, "data", "attachments.sqlite");
 const attachmentStore = createAttachmentStore(attachmentDatabasePath);
+const networkAddresses = discoverNetworkAddresses();
 const httpPort = Number(process.env.HTTP_PORT || "3000");
 if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
     console.error("HTTP_PORT must be an integer between 1 and 65535");
     process.exit(1);
 }
 
-let publicBaseUrl = null;
-if (process.env.PUBLIC_BASE_URL) {
+function resolveBaseUrl(configuredUrl, detectedAddress, name) {
+    const value = configuredUrl || (detectedAddress ? `http://${detectedAddress}:${httpPort}` : null);
+    if (!value) {
+        return null;
+    }
+
     try {
-        const parsedBaseUrl = new URL(process.env.PUBLIC_BASE_URL);
-        if (parsedBaseUrl.protocol !== "http:" ||
-            parsedBaseUrl.username ||
-            parsedBaseUrl.password ||
-            parsedBaseUrl.pathname !== "/" ||
-            parsedBaseUrl.search ||
-            parsedBaseUrl.hash) {
-            throw new Error("PUBLIC_BASE_URL must be an HTTP origin without credentials, path, query, or fragment");
+        const parsedUrl = new URL(value);
+        if (parsedUrl.protocol !== "http:" ||
+            parsedUrl.username ||
+            parsedUrl.password ||
+            parsedUrl.pathname !== "/" ||
+            parsedUrl.search ||
+            parsedUrl.hash) {
+            throw new Error(`${name} must be an HTTP origin without credentials, path, query, or fragment`);
         }
-        publicBaseUrl = parsedBaseUrl.href.replace(/\/+$/, "");
+        return parsedUrl.href.replace(/\/+$/, "");
     } catch (error) {
-        console.error("Invalid PUBLIC_BASE_URL:", error.message);
+        console.error(`Invalid ${name}:`, error.message);
         process.exit(1);
     }
-} else {
-    console.warn("PUBLIC_BASE_URL is unset; permanent attachment links are disabled until it is configured.");
+}
+
+const localBaseUrl = resolveBaseUrl(
+    process.env.LOCAL_BASE_URL,
+    networkAddresses.localIpv4,
+    "LOCAL_BASE_URL"
+);
+const publicBaseUrl = resolveBaseUrl(
+    process.env.PUBLIC_BASE_URL,
+    networkAddresses.tailscaleIpv4,
+    "PUBLIC_BASE_URL"
+);
+if (!localBaseUrl) {
+    console.warn("No local IPv4 address found; set LOCAL_BASE_URL to enable LAN links.");
+}
+if (!publicBaseUrl) {
+    console.warn("No Tailscale IPv4 address found; set PUBLIC_BASE_URL to enable remote fallback links.");
 }
 
 const API = "http://192.168.178.124:5111";
@@ -147,6 +167,18 @@ const commands = [
     new ContextMenuCommandBuilder()
         .setName("Create permanent links")
         .setType(ApplicationCommandType.Message)
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName("delete-url")
+        .setDescription("Delete a permanent attachment URL")
+        .addStringOption(option =>
+            option
+                .setName("id")
+                .setDescription("The generated attachment URL ID")
+                .setRequired(true)
+                .setMinLength(1)
+                .setMaxLength(22)
+        )
         .toJSON()
 ];
 
@@ -190,9 +222,9 @@ client.on("interactionCreate", async (interaction) => {
                 return;
             }
 
-            if (!publicBaseUrl) {
+            if (!localBaseUrl && !publicBaseUrl) {
                 await interaction.reply({
-                    content: "Permanent attachment links are not configured. Set PUBLIC_BASE_URL on the bot first.",
+                    content: "No local or Tailscale address was found. Set LOCAL_BASE_URL or PUBLIC_BASE_URL on the bot.",
                     ephemeral: true
                 });
                 return;
@@ -207,12 +239,23 @@ client.on("interactionCreate", async (interaction) => {
                     filename: attachment.name
                 }))
             );
-            const links = attachmentRecords.map(({ id }) => `${publicBaseUrl}/file/${id}`);
-            await interaction.editReply({ content: links.join("\n") });
+            await sendAttachmentLinksToInteraction(interaction, attachmentRecords);
             return;
         }
 
         if (!interaction.isChatInputCommand()) return;
+
+        if (interaction.commandName === "delete-url") {
+            const id = interaction.options.getString("id", true);
+            const wasDeleted = attachmentStore.delete(id);
+            await interaction.reply({
+                content: wasDeleted
+                    ? `Deleted the permanent URL for ID \`${id}\`.`
+                    : `No permanent URL was found for ID \`${id}\`.`,
+                ephemeral: true
+            });
+            return;
+        }
 
         if (interaction.commandName === "gif") {
             const image = interaction.options.getAttachment("image", true);
@@ -679,6 +722,46 @@ client.on("interactionCreate", async (interaction) => {
     }
 });
 
+function formatAttachmentLinkBlocks(records) {
+    return records.map((record, index) => {
+        const lines = [`Attachment ${index + 1}:`];
+        if (localBaseUrl) {
+            lines.push(`Local: ${localBaseUrl}/file/${record.id}`);
+        }
+        if (publicBaseUrl) {
+            lines.push(`Tailscale fallback: ${publicBaseUrl}/file/${record.id}`);
+        }
+        return lines.join("\n");
+    });
+}
+
+function chunkAttachmentLinkBlocks(records) {
+    const blocks = formatAttachmentLinkBlocks(records);
+    const chunks = [];
+    let currentChunk = "";
+
+    for (const block of blocks) {
+        const candidate = currentChunk ? `${currentChunk}\n\n${block}` : block;
+        if (candidate.length > 1800 && currentChunk) {
+            chunks.push(currentChunk);
+            currentChunk = block;
+        } else {
+            currentChunk = candidate;
+        }
+    }
+    if (currentChunk) {
+        chunks.push(currentChunk);
+    }
+    return chunks;
+}
+
+async function sendAttachmentLinksToInteraction(interaction, records) {
+    const chunks = chunkAttachmentLinkBlocks(records);
+    await interaction.editReply({ content: chunks[0] });
+    for (const chunk of chunks.slice(1)) {
+        await interaction.followUp({ content: chunk, ephemeral: true });
+    }
+}
 
 function getTitleFromSongID(songID) {
     if (songID.includes(" - ")) {

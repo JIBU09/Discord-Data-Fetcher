@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const Database = require("better-sqlite3");
 
@@ -36,6 +37,10 @@ function createAttachmentStore(databasePath) {
             created_at TEXT NOT NULL
         )
     `);
+    database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_permanent_attachments_source
+        ON permanent_attachments (channel_id, message_id, attachment_id)
+    `);
 
     const insertAttachment = database.prepare(`
         INSERT INTO permanent_attachments
@@ -43,10 +48,26 @@ function createAttachmentStore(databasePath) {
         VALUES
             (@id, @channel_id, @message_id, @attachment_id, @filename, @created_at)
     `);
+    const deleteAttachment = database.prepare("DELETE FROM permanent_attachments WHERE id = ?");
+    const findAttachment = database.prepare(`
+        SELECT id, channel_id, message_id, attachment_id, filename, created_at
+        FROM permanent_attachments
+        WHERE channel_id = ? AND message_id = ? AND attachment_id = ?
+        ORDER BY rowid
+        LIMIT 1
+    `);
     const insertAttachments = database.transaction((attachments) => attachments.map((attachment) => {
-        let record;
+        const existing = findAttachment.get(
+            attachment.channel_id,
+            attachment.message_id,
+            attachment.attachment_id
+        );
+        if (existing) {
+            return existing;
+        }
+
         for (let attempt = 0; attempt < 5; attempt++) {
-            record = {
+            const record = {
                 id: crypto.randomBytes(16).toString("base64url"),
                 channel_id: attachment.channel_id,
                 message_id: attachment.message_id,
@@ -77,6 +98,9 @@ function createAttachmentStore(databasePath) {
                 FROM permanent_attachments
                 WHERE id = ?
             `).get(id);
+        },
+        delete(id) {
+            return deleteAttachment.run(id).changes > 0;
         },
         close() {
             database.close();
@@ -171,10 +195,64 @@ function isTailscaleAddress(address) {
         groups[2] === 0xa1e0;
 }
 
+function isPrivateIpv4Address(address) {
+    if (typeof address !== "string") {
+        return false;
+    }
+
+    if (address.startsWith("::ffff:")) {
+        return isPrivateIpv4Address(address.slice(7));
+    }
+    if (!net.isIPv4(address)) {
+        return false;
+    }
+
+    const [first, second] = address.split(".").map(Number);
+    return first === 10 ||
+        (first === 172 && second >= 16 && second <= 31) ||
+        (first === 192 && second === 168);
+}
+
+function isAllowedNetworkAddress(address) {
+    return isTailscaleAddress(address) || isPrivateIpv4Address(address);
+}
+
+function discoverNetworkAddresses(interfaces = os.networkInterfaces()) {
+    const addresses = [];
+    for (const [name, interfaceAddresses] of Object.entries(interfaces)) {
+        for (const address of interfaceAddresses || []) {
+            if (!address.internal && (address.family === "IPv4" || address.family === 4)) {
+                addresses.push({ name, address: address.address });
+            }
+        }
+    }
+
+    const tailscaleIpv4 = addresses
+        .filter(({ address }) => isTailscaleAddress(address))
+        .sort((left, right) => Number(!/^tailscale/i.test(left.name)) - Number(!/^tailscale/i.test(right.name)))[0]?.address;
+    const localIpv4 = addresses
+        .filter(({ name, address }) =>
+            isPrivateIpv4Address(address) &&
+            !/^(tailscale|docker|br-|veth|virbr|vmnet|vboxnet)/i.test(name))
+        .sort((left, right) => {
+            const interfacePriority = (name) => /^(eth|en|wlan|wl)/i.test(name) ? 0 : 1;
+            const subnetPriority = (address) => {
+                if (address.startsWith("192.168.")) return 0;
+                if (address.startsWith("10.")) return 1;
+                return 2;
+            };
+            return interfacePriority(left.name) - interfacePriority(right.name) ||
+                subnetPriority(left.address) - subnetPriority(right.address) ||
+                left.name.localeCompare(right.name);
+        })[0]?.address;
+
+    return { localIpv4: localIpv4 || null, tailscaleIpv4: tailscaleIpv4 || null };
+}
+
 function createAttachmentServer({
     store,
     client,
-    isAllowedAddress = isTailscaleAddress,
+    isAllowedAddress = isAllowedNetworkAddress,
     logger = console
 }) {
     const rateLimits = new Map();
@@ -296,6 +374,9 @@ function sendResponse(response, statusCode, message) {
 module.exports = {
     createAttachmentServer,
     createAttachmentStore,
+    discoverNetworkAddresses,
     getCurrentAttachmentUrl,
+    isAllowedNetworkAddress,
+    isPrivateIpv4Address,
     isTailscaleAddress
 };
